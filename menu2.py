@@ -6,6 +6,8 @@ import re
 from html import escape
 from zoneinfo import ZoneInfo
 
+from pathlib import Path  #추가됨
+
 import pandas as pd
 import streamlit as st
 from streamlit.components.v1 import html
@@ -17,6 +19,90 @@ from fnc2 import (
     fetch_lp,
 )
 
+#추가됨
+TARGET_CODE_FILE = "선정종목 100개.xlsx"
+
+#추가됨
+def find_target_excel_file(file_name: str) -> str | None:
+    """
+    실행 위치 기준으로 엑셀 파일명을 자동 탐색
+    우선순위:
+    1) 현재 작업 폴더
+    2) 현재 스크립트 파일 폴더
+    3) 하위 폴더 전체 재귀 탐색
+    """
+    cwd_path = Path.cwd() / file_name
+    if cwd_path.exists():
+        return str(cwd_path)
+
+    try:
+        base_dir = Path(__file__).resolve().parent
+    except NameError:
+        base_dir = Path.cwd()
+
+    script_path = base_dir / file_name
+    if script_path.exists():
+        return str(script_path)
+
+    matches = list(base_dir.rglob(file_name))
+    if matches:
+        return str(matches[0])
+
+    return None
+
+
+#추가됨
+def load_target_codes_from_excel(
+    file_name: str,
+    sheet_name=0,
+    code_col_idx: int = 1,   # B열 = index 1
+    skip_rows: int = 0,
+) -> set[str]:
+    """
+    엑셀 파일명을 받아 자동으로 파일 위치를 찾고,
+    해당 파일의 B열 종목코드를 읽어 set으로 반환
+    """
+    found_path = find_target_excel_file(file_name)
+    if not found_path:
+        return set()
+
+    df_codes = pd.read_excel(
+        found_path,
+        sheet_name=sheet_name,
+        usecols=[code_col_idx],
+        dtype=str,
+        skiprows=skip_rows,
+        header=None,
+    )
+
+    codes = (
+        df_codes.iloc[:, 0]
+        .dropna()
+        .astype(str)
+        .str.strip()
+        .str.replace(r"\.0$", "", regex=True)
+        .str.zfill(6)
+    )
+
+    codes = codes[codes.str.match(r"^[0-9A-Z]{6}$", na=False)]
+
+    return set(codes.tolist())
+
+
+#추가됨
+def find_code_column(df: pd.DataFrame) -> str | None:
+    """
+    원본 공시 데이터에서 종목코드 컬럼명을 탐색
+    """
+    candidates = [
+        "종목코드", "단축코드", "code", "Code", "CODE",
+        "isuCd", "ISU_CD", "표준코드"
+    ]
+    for c in candidates:
+        if c in df.columns:
+            return c
+    return None
+    
 # ─────────────────────────────────────────────────────────────
 # 메뉴 스펙
 # ─────────────────────────────────────────────────────────────
@@ -316,6 +402,8 @@ def run():
         )
         case_sens = False
 
+        only_target = st.checkbox("엑셀 B열 종목코드만 보기", value=False)  #추가됨
+
         # 4) 조회 시간
         TIME_START = [("00:00", datetime.time(0, 0)),
                       ("14:30", datetime.time(14, 30))]
@@ -402,6 +490,37 @@ def run():
         st.warning("해당 조건에 일치하는 데이터가 없습니다.")
         return
 
+    # (0) 엑셀 종목코드 필터 #추가됨
+    df_view = df_raw.copy()
+
+    if only_target:
+        target_codes = load_target_codes_from_excel(TARGET_CODE_FILE_NAME)
+
+        if not target_codes:
+            st.warning(f"엑셀 파일을 찾지 못했거나 종목코드를 읽지 못했습니다: {TARGET_CODE_FILE_NAME}")
+            return
+
+        code_col = find_code_column(df_view)
+
+        if code_col is None:
+            st.warning("원본 공시 데이터에 종목코드 컬럼이 없습니다. fnc2.py에서 종목코드도 함께 수집해야 합니다.")
+            st.write("현재 컬럼 목록:", df_view.columns.tolist())  #추가됨
+            return
+
+        df_view[code_col] = (
+            df_view[code_col]
+            .astype(str)
+            .str.strip()
+            .str.replace(r"\.0$", "", regex=True)
+            .str.zfill(6)
+        )
+
+        df_view = df_view[df_view[code_col].isin(target_codes)]
+
+        if df_view.empty:
+            st.warning("엑셀 B열 종목코드 기준으로 필터링한 결과가 없습니다.")
+            return
+            
     # (1) 키워드 필터
     df_view = df_raw.copy()
     if keyword.strip():
